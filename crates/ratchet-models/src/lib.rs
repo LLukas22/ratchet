@@ -2,6 +2,7 @@
 pub mod moondream;
 pub mod phi2;
 pub mod phi3;
+pub mod bert;
 pub mod registry;
 mod token_stream;
 pub mod whisper;
