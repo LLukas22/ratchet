@@ -1,7 +1,6 @@
 use super::config::Config;
 use crate::whisper::residual_block::*;
 use half::f16;
-use num::Zero;
 use ratchet::{prelude::*, DType, TensorDType};
 use ratchet_loader::gguf::gguf::Header;
 use ratchet_nn::{Embedding, KVCache, LayerNorm, Module};
@@ -74,6 +73,7 @@ impl Module for DecoderStem {
             .slice(&[start..end, 0..self.pos_embed.shape()[1]])?;
 
         sliced = sliced.cast(self.token_embed.weight.dt().activation_dt())?;
+
         self.token_embed.schedule(tokens)?.add(sliced)
     }
 }
@@ -325,7 +325,10 @@ def ground(options):
         let header = gguf::Header::read(&mut reader).unwrap();
 
         let device = Device::request_device(DeviceRequest::GPU).unwrap();
-        let audio_ctx = Tensor::read_npy::<f32, _>(hs_npy, &device)?;
+
+        let audio_ctx = Tensor::read_npy::<f32, _>(hs_npy, &device)?
+            .cast(device.compute_precision())?
+            .resolve()?;
         let mut decoder = WhisperDecoder::load(&header, &config, &mut reader, &device)?;
 
         let mut tokens = vec![50258, 50259, 50359];
@@ -335,10 +338,13 @@ def ground(options):
         while tokens[tokens.len() - 1] != 50257 {
             let token_t =
                 Tensor::from_data(tokens.clone(), shape![1, tokens.len()], device.clone());
-            let result = decoder.schedule([audio_ctx.clone(), token_t])?.resolve()?;
+            let result = decoder
+                .schedule([audio_ctx.clone(), token_t])?
+                .resolve_debug()?;
 
             let our_logits = result.to(&Device::CPU)?;
             let nd_logits = our_logits.to_ndarray_view::<f32>();
+            println!("ND LOGITS: {:?}", nd_logits);
             all_logits.push(Tensor::from(
                 nd_logits
                     .slice(s![.., .., ..tokenizer.get_vocab_size(true)])
@@ -363,6 +369,7 @@ def ground(options):
 
         let u32_tokens: Vec<_> = all_tokens.iter().map(|&x| x as u32).collect();
         let decoded = tokenizer.decode(&u32_tokens, true).unwrap();
+        println!("All tokens: {:?}", all_tokens);
         println!("Decoded: {}", decoded);
 
         let ground_logits = ground_truth(&audio_path.to_string_lossy(), options)?;
