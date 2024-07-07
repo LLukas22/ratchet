@@ -73,7 +73,8 @@ import torch
 def ground():
     tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
     model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
+    model = model.eval()
+    
     input_sentence = "Why did the crab cross the road?"
     inputs = tokenizer(input_sentence, return_tensors="pt")
 
@@ -102,7 +103,7 @@ def ground():
         //Explicitly disable padding, as it defaults to 128 min tokens
         let tokenizer = tokenizer.with_padding(None);
 
-        let prompt = "Why did the crab cross the road?";
+        let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
         println!("Prompt: '{}'", prompt);
 
         let encoding = tokenizer.encode(prompt, true).unwrap();
