@@ -90,6 +90,7 @@ impl Module for BertSelfAttention {
     fn schedule(&self, input: Self::Input) -> anyhow::Result<Tensor> {
         let [batch_size, seq_len, embedding_dim]: [usize; 3] = input.shape().try_into()?;
 
+        let residual = input.clone();
         let q = self.q.schedule(input.clone())?;
         let k = self.k.schedule(input.clone())?;
         let v = self.v.schedule(input.clone())?;
@@ -114,8 +115,8 @@ impl Module for BertSelfAttention {
 
         let output = self.o.schedule(output)?;
 
-        // Bypass: re-add the layer input
-        let output = output.add(input)?;
+        // Add residual
+        let output = output.add(residual)?;
 
         // attention layer norm
         let output = self.norm.schedule(output)?;

@@ -68,9 +68,10 @@ impl Module for EncoderLayer {
 
     fn schedule(&self, input: Self::Input) -> anyhow::Result<Tensor> {
         let attention = self.attention.schedule(input)?;
-        let mlp = self.mlp.schedule(attention.clone())?;
-        //Bypass and norm
-        let norm = self.norm.schedule(mlp.add(attention)?)?;
+        let residual = attention.clone();
+        let mlp = self.mlp.schedule(attention)?;
+        //Residual and norm
+        let norm = self.norm.schedule(mlp.add(residual)?)?;
         Ok(norm)
     }
 }
