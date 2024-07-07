@@ -70,8 +70,8 @@ mod bert_tests {
     fn load_bert() -> anyhow::Result<()> {
         let _ = env_logger::builder().is_test(true).try_init();
         let api = Api::new().unwrap();
-        let model_repo = api.model("LLukas22/all-MiniLM-L6-v2-Q8_0-GGUF".to_string());
-        let model_path = model_repo.get("all-minilm-l6-v2-q8_0.gguf").unwrap();
+        let model_repo = api.model("LLukas22/all-MiniLM-L6-v2-GGUF".to_string());
+        let model_path = model_repo.get("all-minilm-l6-v2-f32.gguf").unwrap();
         println!("MODEL PATH: {}", model_path.display());
 
         let tokenizer_repo = api.model("sentence-transformers/all-MiniLM-L6-v2".to_string());
