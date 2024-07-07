@@ -55,8 +55,6 @@ impl BERT {
 #[cfg(test)]
 mod bert_tests {
     use hf_hub::api::sync::Api;
-    use ndarray::Axis;
-    use ndarray_stats::QuantileExt;
     use numpy::PyArrayDyn;
     use pyo3::{types::PyModule, Python};
     use ratchet::{prelude::shape, Device, DeviceRequest, Tensor};
@@ -66,6 +64,30 @@ mod bert_tests {
 
     use crate::bert::{embedding::EmbeddingInput, BERT};
 
+    fn ground_truth() -> anyhow::Result<Tensor> {
+        let prg = r#"
+from transformers import AutoTokenizer, AutoModel
+import torch 
+
+
+def ground():
+    tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+    model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+
+    input_sentence = "Why did the crab cross the road?"
+    inputs = tokenizer(input_sentence, return_tensors="pt")
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    return outputs.last_hidden_state.numpy()
+"#;
+        Python::with_gil(|py| {
+            let prg = PyModule::from_code(py, prg, "x.py", "x")?;
+            let py_result: &PyArrayDyn<f32> = prg.getattr("ground")?.call0()?.extract()?;
+            Ok(Tensor::from(py_result))
+        })
+    }
     #[test]
     fn load_bert() -> anyhow::Result<()> {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -76,10 +98,13 @@ mod bert_tests {
 
         let tokenizer_repo = api.model("sentence-transformers/all-MiniLM-L6-v2".to_string());
         let tokenizer_path = tokenizer_repo.get("tokenizer.json").unwrap();
-        let tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
+        let mut tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
+        //Explicitly disable padding, as it defaults to 128 min tokens
+        let tokenizer = tokenizer.with_padding(None);
 
         let prompt = "Why did the crab cross the road?";
         println!("Prompt: '{}'", prompt);
+
         let encoding = tokenizer.encode(prompt, true).unwrap();
         let tokens = encoding
             .get_ids()
@@ -104,7 +129,15 @@ mod bert_tests {
 
         let result = model.schedule(input)?.resolve()?;
         let result = result.to(&Device::CPU)?;
-        println!("{:?}", result);
+
+        println!("RATCHET: {:?}", result);
+
+        let gt = ground_truth()?;
+
+        println!("GROUND TRUTH: {:?}", gt);
+
+        let matches = gt.all_close(&result, 1e-3, 1e-3).is_ok();
+        assert!(matches);
         Ok(())
     }
 }
