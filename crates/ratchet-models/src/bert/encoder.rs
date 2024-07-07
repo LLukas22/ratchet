@@ -47,7 +47,7 @@ impl EncoderLayer {
 
         let mlp = MLP::new(
             Linear::new(lt("ffn_up.weight")?, Some(lt("ffn_up.bias")?)),
-            Linear::new(lt("ffn_up.weight")?, Some(lt("ffn_up.bias")?)),
+            Linear::new(lt("ffn_down.weight")?, Some(lt("ffn_down.bias")?)),
         );
 
         let norm = LayerNorm::new(

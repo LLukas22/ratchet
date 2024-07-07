@@ -79,7 +79,7 @@ mod bert_tests {
         let tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
 
         let prompt = "Why did the crab cross the road?";
-        print!("{}", prompt);
+        println!("Prompt: '{}'", prompt);
         let encoding = tokenizer.encode(prompt, true).unwrap();
         let tokens = encoding
             .get_ids()
@@ -104,7 +104,7 @@ mod bert_tests {
 
         let result = model.schedule(input)?.resolve()?;
         let result = result.to(&Device::CPU)?;
-        print!("{:?}", result);
+        println!("{:?}", result);
         Ok(())
     }
 }

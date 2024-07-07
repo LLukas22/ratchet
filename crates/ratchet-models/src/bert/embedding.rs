@@ -29,7 +29,7 @@ impl Module for BertEmbedding {
 
         let embeddings = input_embeddings.add(token_type_embeddings)?;
 
-        let position_ids = (0..seq_len as u32).collect::<Vec<_>>();
+        let position_ids = (0..seq_len as i32).collect::<Vec<_>>();
         let position_ids =
             Tensor::from_data(position_ids, shape![seq_len], embeddings.device().clone());
         let position_embeddings = self.position_embedding.schedule(position_ids)?;
