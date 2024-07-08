@@ -3,6 +3,7 @@ use ratchet_loader::gguf::gguf::Header;
 use ratchet_nn::{Embedding, LayerNorm, Module};
 use std::io::{BufRead, Seek};
 
+#[derive(Clone)]
 pub struct EmbeddingInput {
     pub input_ids: Tensor,
     pub token_type_ids: Tensor,

@@ -108,8 +108,7 @@ impl Module for BertSelfAttention {
         let scores = query_states.matmul(key_states, false, true)?;
         let attention = scores.mul(self.softmax_scale.clone())?.softmax(3)?;
 
-        let output = value_states
-            .matmul(attention, true, false)?
+        let output = attention.matmul(value_states, false, false)?
             .permute(&[0, 2, 1, 3])?;
         let output = output.view(shape![batch_size as _, seq_len, embedding_dim])?;
 

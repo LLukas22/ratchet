@@ -63,32 +63,63 @@ mod bert_tests {
     use tokenizers::Tokenizer;
 
     use crate::bert::{embedding::EmbeddingInput, BERT};
-
-    fn ground_truth() -> anyhow::Result<Tensor> {
-        let prg = r#"
+    const PRG:&str = r#"
 from transformers import AutoTokenizer, AutoModel
+from transformers.models.bert.modeling_bert import BertEmbeddings, BertModel
 import torch 
 
 
-def ground():
+def load()->tuple[AutoTokenizer,BertModel]:
     tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-    model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+    model:BertModel = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
     model = model.eval()
+    return tokenizer,model
+
+def embedding():
+    tokenizer, model = load()
     
     input_sentence = "Why did the crab cross the road?"
     inputs = tokenizer(input_sentence, return_tensors="pt")
-
+    
     with torch.no_grad():
-        outputs = model(**inputs)
+        embeddings = model.embeddings(input_ids=inputs.input_ids,token_type_ids=inputs.token_type_ids)
+        
+    return embeddings.numpy()#
 
-    return outputs.last_hidden_state.numpy()
+
+def encoder_outputs():
+    tokenizer, model = load()
+    
+    input_sentence = "Why did the crab cross the road?"
+    inputs = tokenizer(input_sentence, return_tensors="pt")
+    
+    outputs = []
+    with torch.no_grad():
+        embeddings = model.embeddings(input_ids=inputs.input_ids,token_type_ids=inputs.token_type_ids)
+        hidden_state:torch.Tensor = embeddings
+        for layer in model.encoder.layer:
+            hidden_state:torch.Tensor = layer(hidden_state)[0]
+            outputs.append(hidden_state.clone().numpy())
+    
+    return outputs
 "#;
+
+    fn gt_embeddings() -> anyhow::Result<Tensor> {
         Python::with_gil(|py| {
-            let prg = PyModule::from_code(py, prg, "x.py", "x")?;
-            let py_result: &PyArrayDyn<f32> = prg.getattr("ground")?.call0()?.extract()?;
+            let prg = PyModule::from_code(py, PRG, "x.py", "x")?;
+            let py_result: &PyArrayDyn<f32> = prg.getattr("embedding")?.call0()?.extract()?;
             Ok(Tensor::from(py_result))
         })
     }
+    fn gt_layers() -> anyhow::Result<Vec<Tensor>> {
+        Python::with_gil(|py| {
+            let prg = PyModule::from_code(py, PRG, "x.py", "x")?;
+            let py_result: Vec<&PyArrayDyn<f32>> = prg.getattr("encoder_outputs")?.call0()?.extract()?;
+            Ok(py_result.into_iter().map(Tensor::from).collect::<_>())
+        })
+    }
+
+
     #[test]
     fn load_bert() -> anyhow::Result<()> {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -128,17 +159,22 @@ def ground():
             token_type_ids,
         };
 
-        let result = model.schedule(input)?.resolve()?;
-        let result = result.to(&Device::CPU)?;
+        let ratchet_embeddings = model.embedding.schedule(input.clone())?.resolve()?.to(&Device::CPU)?;
+        let pytorch_embeddings = gt_embeddings()?;
 
-        println!("RATCHET: {:?}", result);
+        let matches = pytorch_embeddings.all_close(&ratchet_embeddings, 1e-3, 1e-3).is_ok();
+        assert!(matches, "Embeddings didn't match!");
 
-        let gt = ground_truth()?;
+        let pytorch_layers = gt_layers()?;
 
-        println!("GROUND TRUTH: {:?}", gt);
+        let mut x = model.embedding.schedule(input.clone())?;
+        for (i, layer) in model.layers.iter().enumerate() {
+            x = layer.schedule(x)?;
+            let result = x.clone().resolve()?.to(&Device::CPU)?;
+            let matches = pytorch_layers[i].all_close(&result, 4e-3, 4e-3).is_ok();
+            assert!(matches, "Layer {} didn't match!", i);
+        } 
 
-        let matches = gt.all_close(&result, 1e-3, 1e-3).is_ok();
-        assert!(matches);
         Ok(())
     }
 }
