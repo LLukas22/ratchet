@@ -6,7 +6,7 @@ use std::io::{BufRead, Seek};
 #[derive(Clone)]
 pub struct EmbeddingInput {
     pub input_ids: Tensor,
-    pub token_type_ids: Tensor,
+    pub token_type_ids: Option<Tensor>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -23,10 +23,21 @@ impl Module for BertEmbedding {
     type Input = EmbeddingInput;
 
     fn schedule(&self, input: Self::Input) -> anyhow::Result<Tensor> {
-        let [_, seq_len]: [usize; 2] = input.input_ids.shape().try_into()?;
+        let EmbeddingInput {
+            input_ids,
+            token_type_ids,
+        } = input;
+        let [_, seq_len]: [usize; 2] = input_ids.shape().try_into()?;
 
-        let input_embeddings = self.word_embedding.schedule(input.input_ids)?;
-        let token_type_embeddings = self.token_type_embedding.schedule(input.token_type_ids)?;
+        let input_embeddings = self.word_embedding.schedule(input_ids)?;
+
+        // default to 0 for all tokens if not provided
+        let token_types = token_type_ids.unwrap_or(Tensor::from_data(
+            vec![0_i32; seq_len],
+            shape![seq_len],
+            input_embeddings.device().clone(),
+        ));
+        let token_type_embeddings = self.token_type_embedding.schedule(token_types)?;
 
         let embeddings = input_embeddings.add(token_type_embeddings)?;
 

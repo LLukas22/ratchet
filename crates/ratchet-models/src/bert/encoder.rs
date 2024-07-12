@@ -1,4 +1,7 @@
-use super::{attn::BertSelfAttention, mlp::MLP};
+use super::{
+    attn::{BertAttentionInput, BertSelfAttention},
+    mlp::MLP,
+};
 
 use std::io::{BufRead, Seek};
 
@@ -82,7 +85,7 @@ impl EncoderLayer {
 }
 
 impl Module for EncoderLayer {
-    type Input = Tensor;
+    type Input = BertAttentionInput;
 
     fn schedule(&self, input: Self::Input) -> anyhow::Result<Tensor> {
         let attention = self.attention.schedule(input)?;

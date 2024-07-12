@@ -7,6 +7,11 @@ use ratchet_nn::{LayerNorm, Linear, Module};
 #[cfg(target_arch = "wasm32")]
 use crate::{ratchet_from_gguf_web, TensorMap};
 
+pub struct BertAttentionInput {
+    pub x: Tensor,
+    pub mask: Option<Tensor>,
+}
+
 #[derive(Debug)]
 pub struct BertSelfAttention {
     q: Linear,
@@ -102,15 +107,17 @@ impl BertSelfAttention {
 }
 
 impl Module for BertSelfAttention {
-    type Input = Tensor;
+    type Input = BertAttentionInput;
 
     fn schedule(&self, input: Self::Input) -> anyhow::Result<Tensor> {
-        let [batch_size, seq_len, embedding_dim]: [usize; 3] = input.shape().try_into()?;
+        let BertAttentionInput { x, mask } = input;
 
-        let residual = input.clone();
-        let q = self.q.schedule(input.clone())?;
-        let k = self.k.schedule(input.clone())?;
-        let v = self.v.schedule(input.clone())?;
+        let [batch_size, seq_len, embedding_dim]: [usize; 3] = x.shape().try_into()?;
+
+        let residual = x.clone();
+        let q = self.q.schedule(x.clone())?;
+        let k = self.k.schedule(x.clone())?;
+        let v = self.v.schedule(x.clone())?;
 
         let attention_shapes = shape![
             batch_size as _,
@@ -123,7 +130,11 @@ impl Module for BertSelfAttention {
         let value_states = v.view(attention_shapes)?.permute(&[0, 2, 1, 3])?;
 
         let scores = query_states.matmul(key_states, false, true)?;
-        let attention = scores.mul(self.softmax_scale.clone())?.softmax(3)?;
+        let mut attention = scores.mul(self.softmax_scale.clone())?;
+        if let Some(m) = mask {
+            attention = attention.add(m)?;
+        }
+        attention = attention.softmax(3)?;
 
         let output = attention
             .matmul(value_states, false, false)?

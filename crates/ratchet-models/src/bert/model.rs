@@ -1,13 +1,19 @@
 use super::{
+    attn::BertAttentionInput,
     embedding::{BertEmbedding, EmbeddingInput},
     encoder::EncoderLayer,
 };
 
-use ratchet::{Device, Tensor};
+use ratchet::{prelude::shape, Device, Tensor, Vec2};
 use ratchet_loader::gguf::gguf::Header;
 use ratchet_nn::Module;
 use std::io::{BufRead, Seek};
 
+pub struct BertInput {
+    pub input_ids: Tensor,
+    pub token_type_ids: Option<Tensor>,
+    pub attention_mask: Option<Vec<Vec<i32>>>,
+}
 pub struct BERT {
     pub embedding: BertEmbedding,
     pub layers: Vec<EncoderLayer>,
@@ -15,18 +21,63 @@ pub struct BERT {
 }
 
 impl Module for BERT {
-    type Input = EmbeddingInput;
+    type Input = BertInput;
 
     fn schedule(&self, input: Self::Input) -> anyhow::Result<Tensor> {
-        let mut x = self.embedding.schedule(input)?;
+        let BertInput {
+            input_ids,
+            token_type_ids,
+            attention_mask,
+        } = input;
+
+        let mask = self.create_mask(&input_ids, attention_mask)?;
+
+        let mut x = self.embedding.schedule(EmbeddingInput {
+            input_ids,
+            token_type_ids,
+        })?;
+
         for layer in self.layers.iter() {
-            x = layer.schedule(x)?;
+            x = layer.schedule(BertAttentionInput {
+                x,
+                mask: mask.clone(),
+            })?;
         }
         Ok(x)
     }
 }
 
 impl BERT {
+    fn create_mask(
+        &self,
+        input_ids: &Tensor,
+        attention_mask: Option<Vec<Vec<i32>>>,
+    ) -> anyhow::Result<Option<Tensor>> {
+        let [batch_size, seq_len]: [usize; 2] = input_ids.shape().try_into()?;
+        if let Some(mask) = attention_mask {
+            let mut batched_attention_masks: Vec<Vec<f32>> = Vec::new();
+
+            for batch_mask in &mask {
+                let attention_mask: Vec<f32> = batch_mask
+                    .iter()
+                    .map(|&x| if x == 0 { f32::NEG_INFINITY } else { 0.0 })
+                    .collect();
+                batched_attention_masks.push(attention_mask);
+            }
+            let flat_mask: Vec<f32> = batched_attention_masks.into_iter().flatten().collect();
+
+            let mut tensor_mask = Tensor::from_data(
+                flat_mask,
+                shape![batch_size, seq_len],
+                input_ids.device().clone(),
+            );
+            tensor_mask = tensor_mask.view(shape![batch_size, 1, 1, seq_len])?;
+            return Ok(Some(tensor_mask));
+        }
+
+        Ok(None)
+    }
+
     pub fn load<R: BufRead + Seek>(
         header: Header,
         reader: &mut R,
@@ -74,7 +125,7 @@ impl BERT {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "pyo3"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod bert_tests {
     use hf_hub::api::sync::Api;
     use numpy::PyArrayDyn;
@@ -84,7 +135,7 @@ mod bert_tests {
     use ratchet_nn::Module;
     use tokenizers::Tokenizer;
 
-    use crate::bert::{embedding::EmbeddingInput, BERT};
+    use crate::bert::{attn::BertAttentionInput, embedding::EmbeddingInput, BERT};
     const PRG: &str = r#"
 from transformers import AutoTokenizer, AutoModel
 from transformers.models.bert.modeling_bert import BertEmbeddings, BertModel
@@ -154,7 +205,7 @@ def encoder_outputs():
         let tokenizer_path = tokenizer_repo.get("tokenizer.json").unwrap();
         let mut tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
         //Explicitly disable padding, as it defaults to 128 min tokens
-        let tokenizer = tokenizer.with_padding(None);
+        //let tokenizer = tokenizer.with_padding(None);
 
         let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
         println!("Prompt: '{}'", prompt);
@@ -166,7 +217,12 @@ def encoder_outputs():
             .map(|&x| x as i32)
             .collect::<Vec<_>>();
 
-        let token_types = vec![0_i32; tokens.len()];
+        let attention_mask = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&x| x as i32)
+            .collect::<Vec<_>>();
+        let attention_mask = vec![attention_mask];
 
         let mut reader = std::io::BufReader::new(std::fs::File::open(model_path)?);
         let device = Device::request_device(DeviceRequest::GPU)?;
@@ -174,33 +230,43 @@ def encoder_outputs():
         let model = BERT::load(content, &mut reader, &device)?;
 
         let input_ids = Tensor::from_data(tokens.clone(), shape![1, tokens.len()], device.clone());
-        let token_type_ids = Tensor::from_data(token_types, shape![1, tokens.len()], device);
+
+        let mask = model.create_mask(&input_ids, Some(attention_mask))?;
+
+        if let Some(m) = mask.clone() {
+            let cloned_mask = m.clone().resolve()?.to(&Device::CPU)?;
+            println!("Mask: '{:?}'", cloned_mask);
+        }
 
         let input = EmbeddingInput {
             input_ids,
-            token_type_ids,
+            token_type_ids: None,
         };
 
         let ratchet_embeddings = model
             .embedding
             .schedule(input.clone())?
+            .slice(&[0..1, 0..10, 0..384])?
             .resolve()?
             .to(&Device::CPU)?;
         let pytorch_embeddings = gt_embeddings()?;
 
-        let matches = pytorch_embeddings
-            .all_close(&ratchet_embeddings, 1e-3, 1e-3)
-            .is_ok();
-        assert!(matches, "Embeddings didn't match!");
+        pytorch_embeddings.all_close(&ratchet_embeddings, 1e-3, 1e-3)?;
 
         let pytorch_layers = gt_layers()?;
 
         let mut x = model.embedding.schedule(input.clone())?;
         for (i, layer) in model.layers.iter().enumerate() {
-            x = layer.schedule(x)?;
-            let result = x.clone().resolve()?.to(&Device::CPU)?;
-            let matches = pytorch_layers[i].all_close(&result, 4e-3, 4e-3).is_ok();
-            assert!(matches, "Layer {} didn't match!", i);
+            x = layer.schedule(BertAttentionInput {
+                x,
+                mask: mask.clone(),
+            })?;
+            let result = x
+                .clone()
+                .slice(&[0..1, 0..10, 0..384])?
+                .resolve()?
+                .to(&Device::CPU)?;
+            pytorch_layers[i].all_close(&result, 4e-3, 4e-3)?;
         }
 
         Ok(())
