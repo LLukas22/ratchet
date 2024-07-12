@@ -133,7 +133,7 @@ mod bert_tests {
     use ratchet::{prelude::shape, Device, DeviceRequest, Tensor};
     use ratchet_loader::gguf;
     use ratchet_nn::Module;
-    use tokenizers::Tokenizer;
+    use tokenizers::{PaddingParams, Tokenizer};
 
     use crate::bert::{attn::BertAttentionInput, embedding::EmbeddingInput, BERT};
     const PRG: &str = r#"
@@ -205,31 +205,45 @@ def encoder_outputs():
         let tokenizer_path = tokenizer_repo.get("tokenizer.json").unwrap();
         let mut tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
         //Explicitly disable padding, as it defaults to 128 min tokens
-        //let tokenizer = tokenizer.with_padding(None);
+        let tokenizer = tokenizer.with_padding(Some(PaddingParams {
+            pad_to_multiple_of: Some(128),
+            ..Default::default()
+        }));
 
         let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
+        let prompt2 = "Another unrelated prompt";
+
         println!("Prompt: '{}'", prompt);
 
-        let encoding = tokenizer.encode(prompt, true).unwrap();
-        let tokens = encoding
-            .get_ids()
-            .iter()
-            .map(|&x| x as i32)
-            .collect::<Vec<_>>();
+        let batch_encoding = tokenizer.encode_batch(vec![prompt, prompt2], true).unwrap();
+        let mut tokens = Vec::new();
+        let mut attention_mask = Vec::new();
 
-        let attention_mask = encoding
-            .get_attention_mask()
-            .iter()
-            .map(|&x| x as i32)
-            .collect::<Vec<_>>();
-        let attention_mask = vec![attention_mask];
+        for encoding in batch_encoding {
+            tokens.push(
+                encoding
+                    .get_ids()
+                    .iter()
+                    .map(|&x| x as i32)
+                    .collect::<Vec<_>>(),
+            );
+
+            attention_mask.push(
+                encoding
+                    .get_attention_mask()
+                    .iter()
+                    .map(|&x| x as i32)
+                    .collect::<Vec<_>>(),
+            );
+        }
 
         let mut reader = std::io::BufReader::new(std::fs::File::open(model_path)?);
         let device = Device::request_device(DeviceRequest::GPU)?;
         let content = gguf::gguf::Header::read(&mut reader)?;
         let model = BERT::load(content, &mut reader, &device)?;
 
-        let input_ids = Tensor::from_data(tokens.clone(), shape![1, tokens.len()], device.clone());
+        let flat_ids: Vec<i32> = tokens.into_iter().flatten().collect();
+        let input_ids = Tensor::from_data(flat_ids.clone(), shape![2, 128], device.clone());
 
         let mask = model.create_mask(&input_ids, Some(attention_mask))?;
 
