@@ -48,20 +48,40 @@ impl BertEmbedding {
         reader: &mut R,
         device: &Device,
     ) -> anyhow::Result<Self> {
-        let eps: f32 = disk_model
+        let lt = |name: &str| disk_model.tensor(reader, &name, device);
+        Self::load_inner(disk_model, lt)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_web(
+        header: &Header,
+        tensors: &mut TensorMap,
+        device: &Device,
+    ) -> anyhow::Result<Self> {
+        let lt = |name: &str| {
+            let tensor = tensors
+                .remove(&name)
+                .ok_or_else(|| anyhow::anyhow!("missing tensor"))?;
+            ratchet_from_gguf_web(tensor, device)
+        };
+        Self::load_inner(header, lt)
+    }
+
+    fn load_inner<F>(header: &Header, mut lt: F) -> anyhow::Result<Self>
+    where
+        F: FnMut(&str) -> anyhow::Result<Tensor>,
+    {
+        let eps: f32 = header
             .metadata
             .get("bert.attention.layer_norm_epsilon")
             .unwrap()
             .to_f32()?;
-        let token_type_embedding =
-            Embedding::new(disk_model.tensor(reader, "token_types.weight", device)?);
-        let position_embedding =
-            Embedding::new(disk_model.tensor(reader, "position_embd.weight", device)?);
-        let word_embedding =
-            Embedding::new(disk_model.tensor(reader, "token_embd.weight", device)?);
+        let token_type_embedding = Embedding::new(lt("token_types.weight")?);
+        let position_embedding = Embedding::new(lt("position_embd.weight")?);
+        let word_embedding = Embedding::new(lt("token_embd.weight")?);
         let norm = LayerNorm::new(
-            disk_model.tensor(reader, "token_embd_norm.weight", device)?,
-            Some(disk_model.tensor(reader, "token_embd_norm.bias", device)?),
+            lt("token_embd_norm.weight")?,
+            Some(lt("token_embd_norm.bias")?),
             eps,
         );
         Ok(Self {

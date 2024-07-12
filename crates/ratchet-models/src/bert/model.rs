@@ -50,9 +50,31 @@ impl BERT {
             device: device.clone(),
         })
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn from_web(header: Header, mut tensors: TensorMap) -> anyhow::Result<Self> {
+        let device = Device::request_device(ratchet::DeviceRequest::GPU).await?;
+        let embedding = BertEmbedding::from_web(&header, reader, &device)?;
+
+        let n_layers = header.metadata.get("bert.block_count").unwrap().to_u32()? as i32;
+
+        let layers = (0..n_layers)
+            .fold(Vec::with_capacity(n_layers as _), |mut blocks, i| {
+                blocks.push(EncoderLayer::from_web(&header, reader, i as _, &device));
+                blocks
+            })
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        Ok(BERT {
+            embedding: embedding,
+            layers: layers,
+            device: device.clone(),
+        })
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "pyo3"))]
 mod bert_tests {
     use hf_hub::api::sync::Api;
     use numpy::PyArrayDyn;
@@ -63,7 +85,7 @@ mod bert_tests {
     use tokenizers::Tokenizer;
 
     use crate::bert::{embedding::EmbeddingInput, BERT};
-    const PRG:&str = r#"
+    const PRG: &str = r#"
 from transformers import AutoTokenizer, AutoModel
 from transformers.models.bert.modeling_bert import BertEmbeddings, BertModel
 import torch 
@@ -114,11 +136,11 @@ def encoder_outputs():
     fn gt_layers() -> anyhow::Result<Vec<Tensor>> {
         Python::with_gil(|py| {
             let prg = PyModule::from_code(py, PRG, "x.py", "x")?;
-            let py_result: Vec<&PyArrayDyn<f32>> = prg.getattr("encoder_outputs")?.call0()?.extract()?;
+            let py_result: Vec<&PyArrayDyn<f32>> =
+                prg.getattr("encoder_outputs")?.call0()?.extract()?;
             Ok(py_result.into_iter().map(Tensor::from).collect::<_>())
         })
     }
-
 
     #[test]
     fn load_bert() -> anyhow::Result<()> {
@@ -159,10 +181,16 @@ def encoder_outputs():
             token_type_ids,
         };
 
-        let ratchet_embeddings = model.embedding.schedule(input.clone())?.resolve()?.to(&Device::CPU)?;
+        let ratchet_embeddings = model
+            .embedding
+            .schedule(input.clone())?
+            .resolve()?
+            .to(&Device::CPU)?;
         let pytorch_embeddings = gt_embeddings()?;
 
-        let matches = pytorch_embeddings.all_close(&ratchet_embeddings, 1e-3, 1e-3).is_ok();
+        let matches = pytorch_embeddings
+            .all_close(&ratchet_embeddings, 1e-3, 1e-3)
+            .is_ok();
         assert!(matches, "Embeddings didn't match!");
 
         let pytorch_layers = gt_layers()?;
@@ -173,7 +201,7 @@ def encoder_outputs():
             let result = x.clone().resolve()?.to(&Device::CPU)?;
             let matches = pytorch_layers[i].all_close(&result, 4e-3, 4e-3).is_ok();
             assert!(matches, "Layer {} didn't match!", i);
-        } 
+        }
 
         Ok(())
     }

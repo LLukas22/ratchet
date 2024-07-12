@@ -30,6 +30,24 @@ impl EncoderLayer {
         Self::load_inner(attention, disk_model, lt, device)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_web(
+        header: &Header,
+        tensors: &mut TensorMap,
+        layer_index: usize,
+        device: &Device,
+    ) -> anyhow::Result<Self> {
+        let attention = BertSelfAttention::from_web(disk_model, reader, layer_index, device)?;
+        let lt = |name: &str| {
+            let key = format!("blk.{}.{}", layer_index, name);
+            let tensor = tensors
+                .remove(&key)
+                .ok_or_else(|| anyhow::anyhow!("missing tensor"))?;
+            ratchet_from_gguf_web(tensor, device)
+        };
+        Self::load_inner(attention, header, lt, device)
+    }
+
     fn load_inner<F>(
         attention: BertSelfAttention,
         header: &Header,

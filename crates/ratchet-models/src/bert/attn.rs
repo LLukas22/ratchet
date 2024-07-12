@@ -33,6 +33,23 @@ impl BertSelfAttention {
         Self::load_inner(disk_model, lt, device)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_web(
+        header: &Header,
+        tensors: &mut TensorMap,
+        layer_index: usize,
+        device: &Device,
+    ) -> anyhow::Result<Self> {
+        let lt = |name: &str| {
+            let key = format!("blk.{}.{}", layer_index, name);
+            let tensor = tensors
+                .remove(&key)
+                .ok_or_else(|| anyhow::anyhow!("missing tensor"))?;
+            ratchet_from_gguf_web(tensor, device)
+        };
+        Self::load_inner(header, lt, device)
+    }
+
     fn load_inner<F>(header: &Header, mut lt: F, device: &Device) -> anyhow::Result<Self>
     where
         F: FnMut(&str) -> anyhow::Result<Tensor>,
@@ -108,7 +125,8 @@ impl Module for BertSelfAttention {
         let scores = query_states.matmul(key_states, false, true)?;
         let attention = scores.mul(self.softmax_scale.clone())?.softmax(3)?;
 
-        let output = attention.matmul(value_states, false, false)?
+        let output = attention
+            .matmul(value_states, false, false)?
             .permute(&[0, 2, 1, 3])?;
         let output = output.view(shape![batch_size as _, seq_len, embedding_dim])?;
 
