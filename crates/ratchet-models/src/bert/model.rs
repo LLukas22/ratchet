@@ -2,9 +2,10 @@ use super::{
     attn::BertAttentionInput,
     embedding::{BertEmbedding, EmbeddingInput},
     encoder::EncoderLayer,
+    pooler::MeanPooling,
 };
 
-use ratchet::{prelude::shape, Device, Tensor, Vec2};
+use ratchet::{prelude::shape, Device, Tensor};
 use ratchet_loader::gguf::gguf::Header;
 use ratchet_nn::Module;
 use std::io::{BufRead, Seek};
@@ -133,13 +134,24 @@ mod bert_tests {
     use ratchet::{prelude::shape, Device, DeviceRequest, Tensor};
     use ratchet_loader::gguf;
     use ratchet_nn::Module;
-    use tokenizers::{PaddingParams, Tokenizer};
+    use tokenizers::{
+        DecoderWrapper, ModelWrapper, NormalizerWrapper, PaddingParams, PostProcessorWrapper,
+        PreTokenizerWrapper, Tokenizer, TokenizerImpl,
+    };
 
-    use crate::bert::{attn::BertAttentionInput, embedding::EmbeddingInput, BERT};
+    use crate::bert::{
+        attn::BertAttentionInput, embedding::EmbeddingInput, model::BertInput, pooler::Pooler, BERT,
+    };
     const PRG: &str = r#"
 from transformers import AutoTokenizer, AutoModel
-from transformers.models.bert.modeling_bert import BertEmbeddings, BertModel
+from transformers.models.bert.modeling_bert import BertModel
 import torch 
+
+#Mean Pooling - Take attention mask into account for correct averaging
+def mean_pooling(model_output, attention_mask):
+    token_embeddings = model_output[0] #First element of model_output contains all token embeddings
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
 
 def load()->tuple[AutoTokenizer,BertModel]:
@@ -157,7 +169,7 @@ def embedding():
     with torch.no_grad():
         embeddings = model.embeddings(input_ids=inputs.input_ids,token_type_ids=inputs.token_type_ids)
         
-    return embeddings.numpy()#
+    return embeddings.numpy()
 
 
 def encoder_outputs():
@@ -175,26 +187,55 @@ def encoder_outputs():
             outputs.append(hidden_state.clone().numpy())
     
     return outputs
+
+
+def pooled_output():
+    tokenizer, model = load()
+    
+    input_sentence = "Why did the crab cross the road?"
+    input_sentence2 = "Another unrelated prompt"
+    inputs = tokenizer([input_sentence, input_sentence2], return_tensors="pt", padding=True)
+
+    with torch.no_grad():
+        results = model(**inputs)
+        pooled = mean_pooling(results, inputs["attention_mask"])
+
+    return pooled.numpy()
 "#;
 
     fn gt_embeddings() -> anyhow::Result<Tensor> {
         Python::with_gil(|py| {
-            let prg = PyModule::from_code(py, PRG, "x.py", "x")?;
+            let prg = PyModule::from_code(py, PRG, "e.py", "e")?;
             let py_result: &PyArrayDyn<f32> = prg.getattr("embedding")?.call0()?.extract()?;
             Ok(Tensor::from(py_result))
         })
     }
     fn gt_layers() -> anyhow::Result<Vec<Tensor>> {
         Python::with_gil(|py| {
-            let prg = PyModule::from_code(py, PRG, "x.py", "x")?;
+            let prg = PyModule::from_code(py, PRG, "l.py", "l")?;
             let py_result: Vec<&PyArrayDyn<f32>> =
                 prg.getattr("encoder_outputs")?.call0()?.extract()?;
             Ok(py_result.into_iter().map(Tensor::from).collect::<_>())
         })
     }
 
-    #[test]
-    fn load_bert() -> anyhow::Result<()> {
+    fn gt_pooling() -> anyhow::Result<Tensor> {
+        Python::with_gil(|py| {
+            let prg = PyModule::from_code(py, PRG, "p.py", "p")?;
+            let py_result: &PyArrayDyn<f32> = prg.getattr("pooled_output")?.call0()?.extract()?;
+            Ok(Tensor::from(py_result))
+        })
+    }
+
+    type BertTokenizer = TokenizerImpl<
+        ModelWrapper,
+        NormalizerWrapper,
+        PreTokenizerWrapper,
+        PostProcessorWrapper,
+        DecoderWrapper,
+    >;
+
+    fn load() -> anyhow::Result<(BERT, BertTokenizer)> {
         let _ = env_logger::builder().is_test(true).try_init();
         let api = Api::new().unwrap();
         let model_repo = api.model("LLukas22/all-MiniLM-L6-v2-GGUF".to_string());
@@ -204,18 +245,26 @@ def encoder_outputs():
         let tokenizer_repo = api.model("sentence-transformers/all-MiniLM-L6-v2".to_string());
         let tokenizer_path = tokenizer_repo.get("tokenizer.json").unwrap();
         let mut tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
-        //Explicitly disable padding, as it defaults to 128 min tokens
+        //Force padding to test masking
         let tokenizer = tokenizer.with_padding(Some(PaddingParams {
             pad_to_multiple_of: Some(128),
             ..Default::default()
         }));
 
-        let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
-        let prompt2 = "Another unrelated prompt";
+        let mut reader = std::io::BufReader::new(std::fs::File::open(model_path)?);
+        let device = Device::request_device(DeviceRequest::GPU)?;
+        let content = gguf::gguf::Header::read(&mut reader)?;
+        let model = BERT::load(content, &mut reader, &device)?;
 
-        println!("Prompt: '{}'", prompt);
+        Ok((model, tokenizer.clone()))
+    }
 
-        let batch_encoding = tokenizer.encode_batch(vec![prompt, prompt2], true).unwrap();
+    fn tokenize(
+        tokenizer: BertTokenizer,
+        inputs: Vec<&str>,
+        device: Device,
+    ) -> anyhow::Result<(Tensor, Vec<Vec<i32>>)> {
+        let batch_encoding = tokenizer.encode_batch(inputs, true).unwrap();
         let mut tokens = Vec::new();
         let mut attention_mask = Vec::new();
 
@@ -237,15 +286,52 @@ def encoder_outputs():
             );
         }
 
-        let mut reader = std::io::BufReader::new(std::fs::File::open(model_path)?);
-        let device = Device::request_device(DeviceRequest::GPU)?;
-        let content = gguf::gguf::Header::read(&mut reader)?;
-        let model = BERT::load(content, &mut reader, &device)?;
-
         let flat_ids: Vec<i32> = tokens.into_iter().flatten().collect();
-        let input_ids = Tensor::from_data(flat_ids.clone(), shape![2, 128], device.clone());
+        let input_ids = Tensor::from_data(flat_ids.clone(), shape![2, 128], device);
+        Ok((input_ids, attention_mask))
+    }
 
-        let mask = model.create_mask(&input_ids, Some(attention_mask))?;
+    #[test]
+    fn embedding() -> anyhow::Result<()> {
+        let (model, tokenizer) = load()?;
+
+        let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
+        let prompt2 = "Another unrelated prompt";
+
+        let (input_ids, _) = tokenize(tokenizer, vec![prompt, prompt2], model.device.clone())?;
+        println!("Prompt: '{}'", prompt);
+
+        let input = EmbeddingInput {
+            input_ids,
+            token_type_ids: None,
+        };
+
+        //Extract embeddings for the first sequence
+        let ratchet_embeddings = model
+            .embedding
+            .schedule(input.clone())?
+            .slice(&[0..1, 0..10, 0..384])?
+            .resolve()?
+            .to(&Device::CPU)?;
+        let pytorch_embeddings = gt_embeddings()?;
+
+        pytorch_embeddings.all_close(&ratchet_embeddings, 1e-3, 1e-3)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn hidden_states() -> anyhow::Result<()> {
+        let (model, tokenizer) = load()?;
+
+        let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
+        let prompt2 = "Another unrelated prompt";
+
+        let (input_ids, attention_mask) =
+            tokenize(tokenizer, vec![prompt, prompt2], model.device.clone())?;
+        println!("Prompt: '{}'", prompt);
+
+        let mask = model.create_mask(&input_ids, Some(attention_mask.clone()))?;
 
         if let Some(m) = mask.clone() {
             let cloned_mask = m.clone().resolve()?.to(&Device::CPU)?;
@@ -257,16 +343,6 @@ def encoder_outputs():
             token_type_ids: None,
         };
 
-        let ratchet_embeddings = model
-            .embedding
-            .schedule(input.clone())?
-            .slice(&[0..1, 0..10, 0..384])?
-            .resolve()?
-            .to(&Device::CPU)?;
-        let pytorch_embeddings = gt_embeddings()?;
-
-        pytorch_embeddings.all_close(&ratchet_embeddings, 1e-3, 1e-3)?;
-
         let pytorch_layers = gt_layers()?;
 
         let mut x = model.embedding.schedule(input.clone())?;
@@ -275,6 +351,8 @@ def encoder_outputs():
                 x,
                 mask: mask.clone(),
             })?;
+
+            //Check if the output correctly matches the pytorch implementation without the mask.
             let result = x
                 .clone()
                 .slice(&[0..1, 0..10, 0..384])?
@@ -282,6 +360,42 @@ def encoder_outputs():
                 .to(&Device::CPU)?;
             pytorch_layers[i].all_close(&result, 4e-3, 4e-3)?;
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn pooling() -> anyhow::Result<()> {
+        let (model, tokenizer) = load()?;
+
+        let prompt = "Why did the crab cross the road?"; // [101, 2339, 2106, 1996, 18081, 2892, 1996, 2346, 1029, 102]
+        let prompt2 = "Another unrelated prompt";
+
+        let (input_ids, attention_mask) =
+            tokenize(tokenizer, vec![prompt, prompt2], model.device.clone())?;
+        println!("Prompt: '{}'", prompt);
+
+        let input = BertInput {
+            input_ids,
+            token_type_ids: None,
+            attention_mask: Some(attention_mask.clone()),
+        };
+
+        let result = model.schedule(input)?.resolve()?;
+
+        let pooler = crate::bert::pooler::MeanPooling;
+        let pooler_input = crate::bert::pooler::PoolerInput {
+            last_hidden_state: result
+                .to(&Device::CPU)?
+                .into_ndarray::<f32>()
+                .into_dimensionality::<ndarray::Ix3>()?,
+            attention_mask: Some(attention_mask),
+        };
+        let pooled = pooler.forward(pooler_input)?;
+
+        let gt_pooled = gt_pooling()?;
+        let gt_pooled = gt_pooled.to_ndarray_view::<f32>();
+        assert!(pooled.shape() == gt_pooled.shape());
 
         Ok(())
     }
