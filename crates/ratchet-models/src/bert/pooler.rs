@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Error};
 use ndarray::{Array2, Array3, Axis};
+use ratchet::{Device, Tensor};
 #[repr(u32)]
+#[derive(Debug)]
 /// GGUF pooling types:
 /// - None: No pooling.
 /// - Mean: Mean pooling.
@@ -28,11 +30,30 @@ impl TryFrom<u32> for PoolingType {
 }
 
 pub struct PoolerInput {
-    pub last_hidden_state: Array3<f32>,
-    pub attention_mask: Option<Vec<Vec<i32>>>, // Mask in the form [batch_size, 1, 1, sequence_length]
+    pub last_hidden_state: Tensor,
+    pub attention_mask: Option<Vec<Vec<i32>>>,
 }
+
 pub trait Pooler {
     fn forward(&self, input: PoolerInput) -> anyhow::Result<Array2<f32>>;
+    /// Resolves and copies a Tensor to CPU.
+    fn resolve_to_ndarray(&self, x: Tensor) -> anyhow::Result<Array3<f32>> {
+        let mut x = if x.resolved() { x } else { x.resolve()? };
+        x = x.to(&Device::CPU)?;
+        Ok(x.into_ndarray::<f32>()
+            .into_dimensionality::<ndarray::Ix3>()?)
+    }
+}
+
+pub fn resolve_pooler(value: u32) -> anyhow::Result<Box<dyn Pooler>> {
+    let pooler_type = PoolingType::try_from(value)?;
+    match pooler_type {
+        PoolingType::Mean => Ok(Box::new(MeanPooling)),
+        _ => Err(anyhow!(
+            "Pooler: `{:?}` is not implemented yet",
+            pooler_type
+        )),
+    }
 }
 
 pub struct MeanPooling;
@@ -50,6 +71,8 @@ impl Pooler for MeanPooling {
             last_hidden_state,
             attention_mask,
         } = input;
+
+        let last_hidden_state = self.resolve_to_ndarray(last_hidden_state)?;
 
         if let Some(attention_mask) = attention_mask {
             let [batch_size, seq_len, embedding_dim]: [usize; 3] =
@@ -71,6 +94,8 @@ impl Pooler for MeanPooling {
                 })
                 .flatten()
                 .collect();
+
+            //TODO check if we can solve this via broadcasting
             let mask = Array3::from_shape_vec((batch_size, seq_len, embedding_dim), flat_mask)?;
 
             let weighted_embeddings = (last_hidden_state * &mask).sum_axis(Axis(1))

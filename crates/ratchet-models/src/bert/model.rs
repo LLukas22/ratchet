@@ -2,7 +2,7 @@ use super::{
     attn::BertAttentionInput,
     embedding::{BertEmbedding, EmbeddingInput},
     encoder::EncoderLayer,
-    pooler::MeanPooling,
+    pooler::{resolve_pooler, Pooler},
 };
 
 use ratchet::{prelude::shape, Device, Tensor};
@@ -18,6 +18,7 @@ pub struct BertInput {
 pub struct BERT {
     pub embedding: BertEmbedding,
     pub layers: Vec<EncoderLayer>,
+    pub pooler: Box<dyn Pooler>,
     pub device: Device,
 }
 
@@ -85,7 +86,7 @@ impl BERT {
         device: &Device,
     ) -> anyhow::Result<Self> {
         let embedding = BertEmbedding::load(&header, reader, device)?;
-
+        let pooler = resolve_pooler(header.metadata.get("bert.pooling_type").unwrap().to_u32()?)?;
         let n_layers = header.metadata.get("bert.block_count").unwrap().to_u32()? as i32;
 
         let layers = (0..n_layers)
@@ -97,8 +98,9 @@ impl BERT {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         Ok(BERT {
-            embedding: embedding,
-            layers: layers,
+            embedding,
+            layers,
+            pooler,
             device: device.clone(),
         })
     }
@@ -107,6 +109,7 @@ impl BERT {
     pub async fn from_web(header: Header, mut tensors: TensorMap) -> anyhow::Result<Self> {
         let device = Device::request_device(ratchet::DeviceRequest::GPU).await?;
         let embedding = BertEmbedding::from_web(&header, reader, &device)?;
+        let pooler = resolve_pooler(header.metadata.get("bert.pooling_type").unwrap().to_u32()?)?;
 
         let n_layers = header.metadata.get("bert.block_count").unwrap().to_u32()? as i32;
 
@@ -119,8 +122,9 @@ impl BERT {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         Ok(BERT {
-            embedding: embedding,
-            layers: layers,
+            embedding,
+            layers,
+            pooler,
             device: device.clone(),
         })
     }
@@ -381,17 +385,13 @@ def pooled_output():
             attention_mask: Some(attention_mask.clone()),
         };
 
-        let result = model.schedule(input)?.resolve()?;
+        let result = model.schedule(input)?;
 
-        let pooler = crate::bert::pooler::MeanPooling;
         let pooler_input = crate::bert::pooler::PoolerInput {
-            last_hidden_state: result
-                .to(&Device::CPU)?
-                .into_ndarray::<f32>()
-                .into_dimensionality::<ndarray::Ix3>()?,
+            last_hidden_state: result,
             attention_mask: Some(attention_mask),
         };
-        let pooled = pooler.forward(pooler_input)?;
+        let pooled = model.pooler.forward(pooler_input)?;
 
         let gt_pooled = gt_pooling()?;
         let gt_pooled = gt_pooled.to_ndarray_view::<f32>();
