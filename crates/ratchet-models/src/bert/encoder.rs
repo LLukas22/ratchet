@@ -12,6 +12,7 @@ use ratchet_nn::{LayerNorm, Linear, Module};
 #[cfg(target_arch = "wasm32")]
 use crate::{ratchet_from_gguf_web, TensorMap};
 
+#[derive(Debug)]
 pub struct EncoderLayer {
     attention: BertSelfAttention,
     mlp: MLP,
@@ -40,7 +41,7 @@ impl EncoderLayer {
         layer_index: usize,
         device: &Device,
     ) -> anyhow::Result<Self> {
-        let attention = BertSelfAttention::from_web(disk_model, reader, layer_index, device)?;
+        let attention = BertSelfAttention::from_web(header, tensors, layer_index, device)?;
         let lt = |name: &str| {
             let key = format!("blk.{}.{}", layer_index, name);
             let tensor = tensors

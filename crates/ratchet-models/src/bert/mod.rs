@@ -14,8 +14,8 @@ use ratchet_nn::Module;
 use tokenizers::Tokenizer;
 
 fn tokenize_batched(
-    tokenizer: Tokenizer,
-    inputs: Vec<&str>,
+    tokenizer: &mut Tokenizer,
+    inputs: Vec<String>,
     device: Device,
 ) -> anyhow::Result<(Tensor, Vec<Vec<i32>>)> {
     let batch_encoding = tokenizer.encode_batch(inputs, true).unwrap();
@@ -48,10 +48,11 @@ fn tokenize_batched(
     Ok((input_ids, attention_mask))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn embed(
     model: &BERT,
-    tokenizer: Tokenizer,
-    inputs: Vec<&str>,
+    tokenizer: &mut Tokenizer,
+    inputs: Vec<String>,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     let (input_ids, attention_mask) = tokenize_batched(tokenizer, inputs, model.device.clone())?;
 
@@ -60,7 +61,35 @@ pub fn embed(
         token_type_ids: None,
         attention_mask: Some(attention_mask.clone()),
     };
-    let hidden_state = model.schedule(input)?;
+    let hidden_state = model.schedule(input)?.resolve()?.to(&Device::CPU)?;
+    let pooler_input = PoolerInput {
+        last_hidden_state: hidden_state,
+        attention_mask: Some(attention_mask),
+    };
+    let pooled = model.pooler.forward(pooler_input)?;
+
+    let mut embeddings = Vec::with_capacity(pooled.nrows());
+    for row in pooled.rows() {
+        let vec: Vec<f32> = row.to_vec();
+        embeddings.push(vec);
+    }
+    Ok(embeddings)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn embed(
+    model: &BERT,
+    tokenizer: &mut Tokenizer,
+    inputs: Vec<String>,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    let (input_ids, attention_mask) = tokenize_batched(tokenizer, inputs, model.device.clone())?;
+
+    let input = BertInput {
+        input_ids: input_ids,
+        token_type_ids: None,
+        attention_mask: Some(attention_mask.clone()),
+    };
+    let hidden_state = model.schedule(input)?.resolve()?.to(&Device::CPU).await?;
     let pooler_input = PoolerInput {
         last_hidden_state: hidden_state,
         attention_mask: Some(attention_mask),

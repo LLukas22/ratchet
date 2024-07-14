@@ -15,12 +15,17 @@ pub struct BertInput {
     pub token_type_ids: Option<Tensor>,
     pub attention_mask: Option<Vec<Vec<i32>>>,
 }
+
+#[derive(Debug)]
 pub struct BERT {
     pub embedding: BertEmbedding,
     pub layers: Vec<EncoderLayer>,
     pub pooler: Box<dyn Pooler>,
     pub device: Device,
 }
+
+#[cfg(target_arch = "wasm32")]
+use crate::{ratchet_from_gguf_web, TensorMap};
 
 impl Module for BERT {
     type Input = BertInput;
@@ -108,14 +113,19 @@ impl BERT {
     #[cfg(target_arch = "wasm32")]
     pub async fn from_web(header: Header, mut tensors: TensorMap) -> anyhow::Result<Self> {
         let device = Device::request_device(ratchet::DeviceRequest::GPU).await?;
-        let embedding = BertEmbedding::from_web(&header, reader, &device)?;
+        let embedding = BertEmbedding::from_web(&header, &mut tensors, &device)?;
         let pooler = resolve_pooler(header.metadata.get("bert.pooling_type").unwrap().to_u32()?)?;
 
         let n_layers = header.metadata.get("bert.block_count").unwrap().to_u32()? as i32;
 
         let layers = (0..n_layers)
             .fold(Vec::with_capacity(n_layers as _), |mut blocks, i| {
-                blocks.push(EncoderLayer::from_web(&header, reader, i as _, &device));
+                blocks.push(EncoderLayer::from_web(
+                    &header,
+                    &mut tensors,
+                    i as _,
+                    &device,
+                ));
                 blocks
             })
             .into_iter()

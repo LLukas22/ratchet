@@ -51,6 +51,25 @@ pub enum PhiVariants {
     Phi3,
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    target_arch = "wasm32",
+    derive(tsify::Tsify, serde::Serialize, serde::Deserialize),
+    tsify(from_wasm_abi),
+    serde(rename_all = "snake_case")
+)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(clap::ValueEnum))]
+pub enum BertVariants {
+    MiniLM,
+}
+
+impl BertVariants {
+    pub fn tokenizer_repo(&self) -> &str {
+        match self {
+            BertVariants::MiniLM => "LLukas22/all-MiniLM-L6-v2-GGUF",
+        }
+    }
+}
 /// # Available Models
 ///
 /// This is a type safe way to surface models to users,
@@ -66,6 +85,7 @@ pub enum AvailableModels {
     Whisper(WhisperVariants),
     Phi(PhiVariants),
     Moondream,
+    Bert(BertVariants),
 }
 
 impl AvailableModels {
@@ -77,6 +97,9 @@ impl AvailableModels {
                 PhiVariants::Phi3 => "FL33TW00D-HF/phi3",
             },
             AvailableModels::Moondream => "ratchet-community/ratchet-moondream-2",
+            AvailableModels::Bert(b) => match b {
+                BertVariants::MiniLM => "LLukas22/all-MiniLM-L6-v2-GGUF",
+            },
         };
         id.to_string()
     }
@@ -97,6 +120,9 @@ impl AvailableModels {
                 PhiVariants::Phi3 => "phi3-mini-4k",
             },
             AvailableModels::Moondream => "moondream",
+            AvailableModels::Bert(b) => match b {
+                BertVariants::MiniLM => "all-minilm-l6-v2",
+            },
         };
         match quantization {
             Quantization::Q8_0 => format!("{}_q8_0.gguf", model_stem),

@@ -12,6 +12,7 @@ pub struct EmbeddingInput {
 #[cfg(target_arch = "wasm32")]
 use {crate::ratchet_from_gguf_web, crate::TensorMap};
 
+#[derive(Debug)]
 pub struct BertEmbedding {
     token_type_embedding: Embedding,
     position_embedding: Embedding,
@@ -71,7 +72,7 @@ impl BertEmbedding {
     ) -> anyhow::Result<Self> {
         let lt = |name: &str| {
             let tensor = tensors
-                .remove(&name)
+                .remove(name)
                 .ok_or_else(|| anyhow::anyhow!("missing tensor"))?;
             ratchet_from_gguf_web(tensor, device)
         };

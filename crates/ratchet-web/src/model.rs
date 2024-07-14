@@ -1,8 +1,10 @@
 use crate::db::*;
 use futures::stream::TryStreamExt;
 use futures::StreamExt;
+use js_sys::{Array, Float32Array};
 use ratchet_hub::{Api, ApiBuilder, RepoType};
 use ratchet_loader::gguf::gguf::{self, Header, TensorInfo};
+use ratchet_models::bert::{self, BERT};
 use ratchet_models::moondream::{self, Moondream};
 use ratchet_models::phi2;
 use ratchet_models::phi2::Phi2;
@@ -11,6 +13,7 @@ use ratchet_models::registry::{AvailableModels, PhiVariants, Quantization};
 use ratchet_models::whisper::{transcribe::transcribe, transcript::StreamedSegment, Whisper};
 use ratchet_models::TensorMap;
 use tokenizers::Tokenizer;
+use uuid::Variant;
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug)]
@@ -19,6 +22,7 @@ pub enum WebModel {
     Phi2(Phi2),
     Phi3(Phi3),
     Moondream(Moondream),
+    Bert(BERT, Tokenizer),
 }
 
 impl WebModel {
@@ -95,6 +99,17 @@ impl WebModel {
                 .unwrap();
                 Ok(JsValue::NULL)
             }
+            WebModel::Bert(model, tokenizer) => {
+                let input: BertInputs = serde_wasm_bindgen::from_value(input)?;
+                let embeddings = bert::embed(&model, tokenizer, input.texts).await.unwrap();
+                let array = Array::new();
+                for row in embeddings.iter() {
+                    let float_array = Float32Array::from(row.as_slice());
+                    array.push(&float_array);
+                }
+
+                Ok(array.into())
+            }
         }
     }
 
@@ -121,6 +136,19 @@ impl WebModel {
             AvailableModels::Moondream => {
                 let model = Moondream::from_web(header, tensor_map).await?;
                 Ok(WebModel::Moondream(model))
+            }
+            AvailableModels::Bert(variant) => {
+                let model = BERT::from_web(header, tensor_map).await?;
+                let model_repo =
+                    ApiBuilder::from_hf(variant.tokenizer_repo(), RepoType::Model).build();
+                // TODO error handling
+                let model_bytes = model_repo
+                    .get("tokenizer.json")
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Failed to load tokenizer"))?;
+                let tokenizer = Tokenizer::from_bytes(model_bytes.to_vec()).unwrap();
+
+                Ok(WebModel::Bert(model, tokenizer))
             }
             _ => Err(anyhow::anyhow!("Unknown model type")),
         }
@@ -149,6 +177,11 @@ pub struct MoondreamInputs {
     pub image_bytes: Vec<u8>,
     #[serde(with = "serde_wasm_bindgen::preserve")]
     pub callback: js_sys::Function,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct BertInputs {
+    pub texts: Vec<String>,
 }
 
 #[wasm_bindgen]

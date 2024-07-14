@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Error};
 use ndarray::{Array2, Array3, Axis};
 use ratchet::{Device, Tensor};
+use std::fmt;
 #[repr(u32)]
 #[derive(Debug)]
 /// GGUF pooling types:
@@ -36,12 +37,24 @@ pub struct PoolerInput {
 
 pub trait Pooler {
     fn forward(&self, input: PoolerInput) -> anyhow::Result<Array2<f32>>;
-    /// Resolves and copies a Tensor to CPU.
-    fn resolve_to_ndarray(&self, x: Tensor) -> anyhow::Result<Array3<f32>> {
-        let mut x = if x.resolved() { x } else { x.resolve()? };
-        x = x.to(&Device::CPU)?;
+
+    fn to_ndarray(&self, x: Tensor) -> anyhow::Result<Array3<f32>> {
+        if !x.resolved() {
+            return Err(anyhow!("Tensor is not resolved!"));
+        }
+
+        if !x.device().is_cpu() {
+            return Err(anyhow!("Tensor is not on CPU!"));
+        }
+
         Ok(x.into_ndarray::<f32>()
             .into_dimensionality::<ndarray::Ix3>()?)
+    }
+}
+
+impl fmt::Debug for dyn Pooler {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Pooler implementation")
     }
 }
 
@@ -72,7 +85,7 @@ impl Pooler for MeanPooling {
             attention_mask,
         } = input;
 
-        let last_hidden_state = self.resolve_to_ndarray(last_hidden_state)?;
+        let last_hidden_state = self.to_ndarray(last_hidden_state)?;
 
         if let Some(attention_mask) = attention_mask {
             let [batch_size, seq_len, embedding_dim]: [usize; 3] =
