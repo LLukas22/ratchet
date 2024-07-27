@@ -1,7 +1,7 @@
 use crate::{gpu::*, DType, Tensor, TensorId};
 use rustc_hash::FxHashMap;
 use std::{borrow::Cow, sync::Arc};
-use wgpu::{Adapter, Limits};
+use wgpu::{Adapter, Limits, MemoryHints};
 
 use crate::DeviceError;
 
@@ -76,6 +76,7 @@ impl WgpuDevice {
                 max_compute_invocations_per_workgroup: 1024,
                 ..Default::default()
             },
+            memory_hints: MemoryHints::Performance,
         };
         let device_request = adapter.request_device(&device_descriptor, None).await;
         let (device, queue) = if let Err(e) = device_request {

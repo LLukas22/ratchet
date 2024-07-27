@@ -60,13 +60,13 @@ pub enum PhiVariants {
 )]
 #[cfg_attr(not(target_arch = "wasm32"), derive(clap::ValueEnum))]
 pub enum BertVariants {
-    MiniLM,
+    MiniLm,
 }
 
 impl BertVariants {
     pub fn tokenizer_repo(&self) -> &str {
         match self {
-            BertVariants::MiniLM => "LLukas22/all-MiniLM-L6-v2-GGUF",
+            BertVariants::MiniLm => "LLukas22/all-MiniLM-L6-v2-GGUF",
         }
     }
 }
@@ -98,7 +98,7 @@ impl AvailableModels {
             },
             AvailableModels::Moondream => "ratchet-community/ratchet-moondream-2",
             AvailableModels::Bert(b) => match b {
-                BertVariants::MiniLM => "LLukas22/all-MiniLM-L6-v2-GGUF",
+                BertVariants::MiniLm => "LLukas22/all-MiniLM-L6-v2-GGUF",
             },
         };
         id.to_string()
@@ -121,7 +121,7 @@ impl AvailableModels {
             },
             AvailableModels::Moondream => "moondream",
             AvailableModels::Bert(b) => match b {
-                BertVariants::MiniLM => "all-minilm-l6-v2",
+                BertVariants::MiniLm => "all-minilm-l6-v2",
             },
         };
         match quantization {
